@@ -4,7 +4,7 @@
 # PLEASE DO NOT EDIT IT DIRECTLY.
 #
 
-FROM debian:trixie-slim
+FROM phusion/baseimage:jammy-1.0.4
 
 # https://github.com/HandBrake/HandBrake/releases
 ENV HANDBRAKE_VERSION 1.10.2
