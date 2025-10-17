@@ -1,118 +1,104 @@
-#
-# NOTE: THIS DOCKERFILE IS GENERATED VIA "apply-templates.sh"
-#
-# PLEASE DO NOT EDIT IT DIRECTLY.
-#
+# ===============================
+# Stage 1: Build FFmpeg with arch-specific optimizations
+# ===============================
+FROM python:slim-bullseye AS build-ffmpeg
+WORKDIR /tmp
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
+ENV LD_LIBRARY_PATH=/usr/local/lib
 
-FROM phusion/baseimage:jammy-1.0.4
+# Detect architecture
+ARG TARGETPLATFORM
+ARG BUILDPLATFORM
+RUN echo "Building on $BUILDPLATFORM for $TARGETPLATFORM"
 
-# https://github.com/HandBrake/HandBrake/releases
-ENV HANDBRAKE_VERSION 1.10.2
+# Install dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    autoconf automake build-essential cmake git pkg-config texinfo \
+    yasm nasm libtool libssl-dev ca-certificates wget \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN set -eux; \
-	savedAptMark="$(apt-mark showmanual)"; \
-	apt-get update; \
-	apt-get install -y --no-install-recommends \
-		bzip2 \
-		ca-certificates \
-		gnupg \
-		wget \
-		\
-		autoconf \
-		automake \
-		autopoint \
-		binutils \
-		cmake \
-		desktop-file-utils \
-		g++ \
-		gcc \
-		gettext \
-		libass-dev \
-		libbz2-dev \
-		libc6-dev \
-		libdrm-dev \
-		libgtk-4-dev \
-		libjansson-dev \
-		liblzma-dev \
-		libmp3lame-dev \
-		libnuma-dev \
-		libopus-dev \
-		libspeex-dev \
-		libtheora-dev \
-		libtool-bin \
-		libturbojpeg-dev \
-		libva-dev \
-		libvorbis-dev \
-		libvpx-dev \
-		libx264-dev \
-		libxml2-dev \
-		make \
-		meson \
-		nasm \
-		patch \
-		pkg-config \
-		python3 \
-		\
-# https://github.com/HandBrake/HandBrake/issues/6006#issuecomment-2081484348
-		git \
-#		libx265-dev \
-	; \
-	apt-get dist-clean; \
-	\
-	wget -O handbrake.tar.bz2.sig "https://github.com/HandBrake/HandBrake/releases/download/$HANDBRAKE_VERSION/HandBrake-$HANDBRAKE_VERSION-source.tar.bz2.sig"; \
-	wget -O handbrake.tar.bz2 "https://github.com/HandBrake/HandBrake/releases/download/$HANDBRAKE_VERSION/HandBrake-$HANDBRAKE_VERSION-source.tar.bz2"; \
-	\
-# https://handbrake.fr/openpgp.php or https://github.com/HandBrake/HandBrake/wiki/OpenPGP
-	GNUPGHOME="$(mktemp -d)"; export GNUPGHOME; \
-	gpg --batch --keyserver keyserver.ubuntu.com --recv-keys '1629 C061 B3DD E7EB 4AE3  4B81 021D B8B4 4E4A 8645'; \
-	gpg --batch --verify handbrake.tar.bz2.sig handbrake.tar.bz2; \
-	gpgconf --kill all; \
-	rm -rf "$GNUPGHOME" handbrake.tar.bz2.sig; \
-	\
-	mkdir -p /tmp/handbrake; \
-	tar --extract \
-		--file handbrake.tar.bz2 \
-		--directory /tmp/handbrake \
-		--strip-components 1 \
-		"HandBrake-$HANDBRAKE_VERSION" \
-	; \
-	rm handbrake.tar.bz2; \
-	\
-	cd /tmp/handbrake; \
-	./configure \
-# TODO --arch [MODE]         select architecture mode: x86_64
-		--build build \
-		--enable-fdk-aac \
-		--enable-numa \
-		--enable-nvenc \
-		--enable-qsv \
-		--enable-vce \
-		--enable-x265 \
-	; \
-	\
-	nproc="$(nproc)"; \
-	make -C build -j "$nproc"; \
-	make -C build install; \
-	\
-	cd /; \
-	rm -rf /tmp/handbrake; \
-	\
-	apt-mark auto '.*' > /dev/null; \
-	[ -z "$savedAptMark" ] || apt-mark manual $savedAptMark > /dev/null; \
-	find /usr/local \
-		-type f \
-		\( -executable -o -name '*.so' \) \
-		-exec ldd '{}' ';' \
-		| awk '/=>/ { so = $(NF-1); if (index(so, "/usr/local/") == 1) { next }; gsub("^/(usr/)?", "", so); printf "*%s\n", so }' \
-		| sort -u \
-		| xargs -r dpkg-query --search \
-		| cut -d: -f1 \
-		| sort -u \
-		| xargs -r apt-mark manual \
-	; \
-	apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false; \
-	\
-	HandBrakeCLI --version; \
-	ghb --help
+# ============ fdk-aac ============
+RUN git clone --depth 1 https://github.com/mstorsjo/fdk-aac.git && \
+    cd fdk-aac && autoreconf -fiv && \
+    ./configure --prefix=/usr/local --disable-shared CFLAGS="-fPIC" && \
+    make -j$(nproc) && make install
 
-CMD ["ghb"]
+# ============ LAME ============
+RUN git clone --depth 1 https://github.com/rbrito/lame.git && \
+    cd lame && ./configure --prefix=/usr/local --disable-shared --enable-nasm && \
+    make -j$(nproc) && make install
+
+# ============ Opus ============
+RUN git clone --depth 1 https://github.com/xiph/opus.git && \
+    cd opus && ./autogen.sh && ./configure --prefix=/usr/local --disable-shared && \
+    make -j$(nproc) && make install
+
+# ============ NVENC headers (only for amd64) ============
+RUN if [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
+        git clone https://git.videolan.org/git/ffmpeg/nv-codec-headers.git && \
+        cd nv-codec-headers && make && make install; \
+    fi
+
+# ============ x264 ============
+RUN git clone --depth 1 https://code.videolan.org/videolan/x264.git && \
+    cd x264 && ./configure --enable-static --disable-shared --prefix=/usr/local && \
+    make -j$(nproc) && make install
+
+# ============ x265 ============
+RUN git clone --depth 1 https://bitbucket.org/multicoreware/x265_git /tmp/x265 && \
+    cd /tmp/x265/build/linux && \
+    cmake -G "Unix Makefiles" \
+      -DCMAKE_INSTALL_PREFIX=/usr/local \
+      -DENABLE_SHARED=OFF \
+      -DENABLE_PIC=ON \
+      ../../source && \
+    make -j$(nproc) && make install && \
+    \
+    # Create or fix pkg-config file
+    mkdir -p /usr/local/lib/pkgconfig && \
+    cat > /usr/local/lib/pkgconfig/x265.pc <<'EOF'
+prefix=/usr/local
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: x265
+Description: H.265/HEVC video encoder
+Version: 3.5
+Libs: -L${libdir} -lx265 -lstdc++ -lpthread -lm
+Libs.private: -ldl -lstdc++
+Cflags: -I${includedir}
+EOF
+
+RUN pkg-config --exists x265 && echo "✅ x265 pkg-config OK" || echo "⚠️ x265 pkg-config missing"
+
+# ============ FFmpeg (multi-arch with NVENC / NEON) ============
+RUN git clone --depth 1 https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg && \
+    cd /tmp/ffmpeg && \
+    echo ">>> Building FFmpeg for $TARGETPLATFORM" && \
+    pkg-config --list-all | grep x265 || true && \
+    \
+    FFMPEG_OPTS=" \
+      --prefix=/usr/local \
+      --pkg-config-flags=--static \
+      --extra-cflags=-I/usr/local/include \
+      --extra-ldflags=-L/usr/local/lib \
+      --extra-libs=\"-lpthread -lm\" \
+      --enable-gpl --enable-nonfree \
+      --enable-libx264 --enable-libx265 \
+      --enable-libmp3lame --enable-libopus --enable-libfdk-aac \
+      --disable-shared --enable-static" && \
+    \
+    if [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
+        FFMPEG_OPTS="$FFMPEG_OPTS --enable-nvenc --enable-nvdec"; \
+    elif [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
+        FFMPEG_OPTS="$FFMPEG_OPTS --enable-neon --enable-asm --enable-v4l2-request --enable-libdrm"; \
+    elif [ "$TARGETPLATFORM" = "linux/arm/v7" ]; then \
+        FFMPEG_OPTS="$FFMPEG_OPTS --enable-neon --enable-asm --cpu=cortex-a72"; \
+    fi && \
+    \
+    eval ./configure $FFMPEG_OPTS && \
+    make -j$(nproc) && \
+    make install && \
+    strip /usr/local/bin/ffmpeg /usr/local/bin/ffprobe
